@@ -1,177 +1,131 @@
 package client;
+// This Java program represents a user in a UDP communication system.
+// It sends and receives messages through an unreliable channel that may delay or drop packets.
 
 import java.io.IOException;
 import java.net.*;
-import java.util.logging.FileHandler;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
-
-/**
- * UserClient is a bidirectional UPD client application that implements
- * {@link SenderClient} and {@link ReceiverClient} interfaces.
- * It sends and receives UDP packets to other clients.
- *
- * @author ahmad
- */
 public class UserClient implements ReceiverClient, SenderClient {
-    /**
-     * The username associated with this client.
-     */
-    final String uName;
+    final String uName; // Client name
+    final int portNumber; // Port this client listens on
+    final DatagramSocket socket; // Socket for sending/receiving packets
+    final static byte[] END_SIGNAL = "END".getBytes(); // Predefined end-of-session signal
 
-    /**
-     * The port number on which this client listens for and sends messages.
-     */
-    final int portNumber;
-
-    /**
-     * {@link DatagramSocket} used for sending and receiving UDP packets.
-     */
-    final DatagramSocket socket;
-
-    /**
-     * The termination signal to end the communication.
-     */
-    final static byte[] END_SIGNAL = "END".getBytes();
-
-    /**
-     * The logger for recording client activities and debugging information.
-     */
-    private final Logger logger = Logger.getLogger(UserClient.class.getName());
+    public InetAddress destinationIP; // IP address of the destination user (used in message)
+    public int destinationPort; // Port number of the destination user
 
     public static void main(String[] args) throws IOException {
-
-        // Check if all arguments are passed
+        // Check if all required arguments are provided
         if (args.length < 7) {
-            System.out.print("Usage: UserClient <userName> <portNumber> <channelIP> <channelPort> <destinationName> <destinationIP> <destinationPort>\n");
+            System.out.print(
+                    "Usage: UserClient <userName> <portNumber> <channelIP> <channelPort> <destinationName> <destinationIP> <destinationPort>\n");
             System.exit(1);
         }
 
-        // Validate the port number as an int
+        // Parse port number (argument 1)
         if (!UserClient.validateInt(args[1])) {
             throw new IllegalArgumentException("Invalid port number: " + args[1]);
         }
 
-        // Parse the client port number into an int
         int portNumber = Integer.parseInt(args[1]);
+        UserClient uc = new UserClient(portNumber, args[0]); // Initialize client
 
-        // Initialize the client app
-        UserClient uc = new UserClient(portNumber, args[0]);
-
-        // Validate the channel IP
-        if (!uc.validateIp(args[2])) {
+        // Parse and validate channel (server) IP and port
+        if (!uc.validateIp(args[2]))
             throw new IllegalArgumentException("Invalid Channel IP address");
-        }
-
-        // Create the Channel IP
         InetAddress channelIP = InetAddress.getByName(args[2]);
 
-        // Validate the Channel port number
-        if (!uc.validatePort(Integer.parseInt(args[3]))) {
+        if (!uc.validatePort(Integer.parseInt(args[3])))
             throw new IllegalArgumentException("Invalid Channel Port number");
-        }
-
-        // Parse the channel port number into an int
         int channelPort = Integer.parseInt(args[3]);
 
-        // The uName of the destination/receiver
+        // Destination client name (e.g., A or B)
         String destinationName = args[4];
 
-        // Validate the destination/receiver IP
-        if (!uc.validateIp(args[5])) {
+        // Destination client IP and port (for message delivery)
+        if (!uc.validateIp(args[5]))
             throw new IllegalArgumentException("Invalid Destination IP address");
-        }
+        InetAddress recvAddr = InetAddress.getByName(args[5]);
 
-        // Create the destination/receiver IP
-        InetAddress recvAdder = InetAddress.getByName(args[5]);
-
-        // Validate the destination/receiver port number
-        if (!uc.validatePort(Integer.parseInt(args[6]))) {
+        if (!uc.validatePort(Integer.parseInt(args[6])))
             throw new IllegalArgumentException("Invalid Destination Port number");
-        }
-
-        // Parse the channel port number into an int
         int recvPort = Integer.parseInt(args[6]);
 
-        // The alternating sequence numbers of the message
-        String[] messages = {"0", "1"};
+        // Store destination address and port to use during send
+        uc.destinationIP = recvAddr;
+        uc.destinationPort = recvPort;
 
-        // A thread for sending packets
+        // Sequence message content (flip between "0" and "1")
+        String[] messages = { "0", "1" };
+
+        // Sender thread
         Thread sendingThread = new Thread(() -> {
-            int count = 0; // Count of packets sent
-            while (count < 1000) {
-                String message = messages[count % 2]; // Alternate the sequence number
-                // Note we are temporarily sending the messages directly to the
-                // destination/receiver since we didn't implement the channel yet
-                // and for test purposes
-                uc.send(message, destinationName, recvAdder, recvPort); // Send the message
+            int count = 0;
+
+            while (count < 10) {
+                String message = messages[count % 2];
+                uc.send(message, destinationName, channelIP, channelPort);
                 count++;
                 try {
-                    Thread.sleep(500); // Delay between each message 0.5 sec
+                    Thread.sleep(500); // Delay between packets
                 } catch (InterruptedException e) {
-                    // If an interruption happens log it
-                    uc.logger.log(Level.WARNING, "Sleep interrupted", e);
-                    // Stop the thread
+                    System.out.println("[Client " + uc.uName + "] Sleep interrupted: " + e.getMessage());
                     Thread.currentThread().interrupt();
-                    // Exit the loop
                     break;
                 }
             }
-            // After all the 1000 packets are sent
-            // Send end-of-transmission signal
-            uc.sendEndSignal(recvAdder, recvPort);
+
+            // Ensure that the last message is processed by the channel before END
+            try {
+                Thread.sleep(1000); // Delay END Signal in case packets still in flight
+            } catch (InterruptedException e) {
+                System.out.println("[Client " + uc.uName + "] Delay before END interrupted");
+            }
+
+            uc.sendEndSignal(channelIP, channelPort); // Send the END signal last
         });
 
-        // A thread for listening for incoming messages
+        // Receiver thread
         Thread receivingThread = new Thread(() -> {
-            int count = 0; // Keeps track of the messages received
+            int count = 0;
             while (true) {
                 DatagramPacket pkt = uc.receive(); // Receive a packet
-                // If the packet is null continue to the next iteration
-                if (pkt == null) {
+                if (pkt == null)
                     continue;
-                }
-                // Get the message from the packet
+
                 String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength());
-                // Check if it is end-of-transmission signal
+
                 if (msg.equals("END")) {
-                    System.out.printf("Received END signal\nTotal messages received: " + count);
+                    // Stop when end signal received
+                    System.out.printf("[Client %s] Received END signal\nTotal messages received: %d\n", uc.uName,
+                            count);
                     break;
                 }
+
                 count++;
-                System.out.println(msg);
+                System.out.println("[Client " + uc.uName + "] Received: " + msg);
             }
         });
 
-        // Start the threads
+        // Start both threads
         sendingThread.start();
         receivingThread.start();
 
-        // Try to join the threads back to the main thread
+        // Wait for both threads to finish
         try {
             receivingThread.join();
             sendingThread.join();
         } catch (InterruptedException e) {
-            // If interruption occurs log it
-            uc.logger.log(Level.SEVERE, "Interrupted while waiting for sending\\receiving thread", e);
+            System.out.println("[Client " + uc.uName + "] ERROR: Thread join interrupted: " + e.getMessage());
         }
 
-        // Close the socket
+        // Close socket and exit
         uc.close();
-
-        // Exit with status code 0 (no errors occured)
         System.exit(0);
     }
 
-    /**
-     * Initializes a UserClient.
-     *
-     * @param portNumber The port number on which this client listens for and sends messages.
-     * @param uName      The username associated with this client.
-     */
+    // Constructor sets up socket and port
     public UserClient(int portNumber, String uName) {
-
         if (!validatePort(portNumber)) {
             throw new IllegalArgumentException("Invalid port number: " + portNumber);
         }
@@ -179,187 +133,121 @@ public class UserClient implements ReceiverClient, SenderClient {
         this.portNumber = portNumber;
         this.uName = uName;
 
-        try {
-            this.logger.addHandler(new FileHandler("ClientLog.txt", true));
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
         DatagramSocket tempSocket = null;
-
         try {
-            tempSocket = new DatagramSocket(portNumber);
+            tempSocket = new DatagramSocket(portNumber); // Bind socket to port
         } catch (SocketException e) {
-            this.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
+            System.out.println("[Client " + uName + "] ERROR: Failed to initialize socket: " + e.getMessage());
         } finally {
             this.socket = tempSocket;
             if (tempSocket != null) {
-                this.logger.log(Level.INFO, "UserClient socket initiated with port number: " + portNumber);
+                System.out.println("[Client " + uName + "] Socket initiated on port " + portNumber);
             }
         }
 
         if (this.socket == null) {
-            throw new RuntimeException("Failed to initialize a socket");
+            throw new RuntimeException("Failed to initialize socket");
         }
     }
 
-    /**
-     * Checks if the port number is valid
-     * and within it's certain bounds and
-     * is not from the set of reserved ports
-     *
-     * @param port The port number to be validated.
-     * @return true if the port is valid otherwise false
-     */
+    // Validate port is within allowed range
     private boolean validatePort(int port) {
         if (port < 1025 || port > 65535) {
-            this.logger.log(Level.SEVERE, "Port out of range (0 - 65535): " + port);
+            System.out.println("[Client " + uName + "] Port out of range: " + port);
             return false;
         }
         return true;
     }
 
-
-    /**
-     * Checks if the ip is a valid {@link InetAddress}
-     *
-     * @param ip The ip address to be validated.
-     * @return true if the ip is valid otherwise false
-     */
+    // Check if a string is a valid IP
     private boolean validateIp(String ip) {
-        if (ip == null || ip.isEmpty()) {
-            this.logger.log(Level.SEVERE, "Invalid IP address: " + ip);
-        }
         try {
             InetAddress.getByName(ip);
             return true;
         } catch (Exception e) {
-            this.logger.log(Level.SEVERE, "Invalid IP address: " + ip);
+            System.out.println("[Client " + uName + "] Invalid IP: " + ip);
             return false;
         }
     }
 
-
-    /**
-     * Checks if the ip is a valid {@link InetAddress}
-     *
-     * @param address The ip address to be validated.
-     * @return true if the ip is valid otherwise false
-     */
+    // Ensure IP address is not null
     private boolean validateAddress(InetAddress address) {
-        if (address == null) {
-            this.logger.log(Level.SEVERE, "recvAdder is null");
-            return false;
-        }
-        return true;
+        return address != null;
     }
 
-    /**
-     * Checks if the {@link DatagramSocket} is functional
-     * and not closed or null.
-     *
-     * @param socket The {@link DatagramSocket} to be validated.
-     * @return true if the socket is functional otherwise false
-     */
+    // Check if socket is usable
     private boolean validateSocket(DatagramSocket socket) {
-        if (socket == null || socket.isClosed()) {
-            this.logger.log(Level.SEVERE, "UserClient socket is closed");
-            return false;
-        }
-        return true;
+        return socket != null && !socket.isClosed();
     }
 
-    /**
-     * Checks if the {@link String} is a valid
-     * integer.
-     *
-     * @param number The {@link String} to be validated.
-     * @return true if the String is an integer otherwise false
-     */
+    // Validate integer string
     private static boolean validateInt(String number) {
         try {
-            int num = Integer.parseInt(number);
+            Integer.parseInt(number);
             return true;
         } catch (NumberFormatException e) {
             return false;
         }
     }
 
+    // Send a message to the channel
     @Override
-    public void send(String message, String destName, InetAddress recvAdder, int port) {
-
-        // Check if all parameters are valid
-        if (!validatePort(port) || !validateAddress(recvAdder) || !validateSocket(this.socket)) {
+    public void send(String message, String destName, InetAddress channelIP, int channelPort) {
+        if (!validatePort(channelPort) || !validateAddress(channelIP) || !validateSocket(this.socket))
             return;
-        }
 
-        // Construct the message in the form "uName destName msg"
-        // TO-DO: Later the message should include the destination IP and Port number
-        // So the channel knows where to send the message
-        String messageToSend = String.format("%s %s %s", uName, destName, message);
+        // Format: <uName> <destName> <destIP> <destPort> <message>
+        String messageToSend = String.format("%s %s %s %d %s",
+                uName,
+                destName,
+                destinationIP.getHostAddress(),
+                destinationPort,
+                message);
+
         byte[] buffer = messageToSend.getBytes();
+        DatagramPacket packet = new DatagramPacket(buffer, buffer.length, channelIP, channelPort);
 
-        // Create the packet
-        DatagramPacket packet = new DatagramPacket(buffer, buffer.length, recvAdder, port);
-
-        // Try to send packet
         try {
             this.socket.send(packet);
+            System.out.println("[Client " + uName + "] Sent to channel: " + messageToSend);
         } catch (IOException e) {
-            // If error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to send message", e);
+            System.out.println("[Client " + uName + "] ERROR: Failed to send message: " + e.getMessage());
         }
     }
 
-    public void sendEndSignal(InetAddress recvAdder, int port) {
-
-        // Check if all parameters are valid
-        if (!validatePort(port) || !validateAddress(recvAdder) || !validateSocket(this.socket)) {
+    // Send END signal to server
+    public void sendEndSignal(InetAddress channelIP, int channelPort) {
+        if (!validatePort(channelPort) || !validateAddress(channelIP) || !validateSocket(this.socket))
             return;
-        }
 
-        // Create the packet
-        // TO-DO: Later the message should include the destination IP and Port number
-        // So the channel knows where to send the message
-        DatagramPacket packet = new DatagramPacket(END_SIGNAL, END_SIGNAL.length, recvAdder, port);
-
-        // Try to send packet
+        DatagramPacket packet = new DatagramPacket(END_SIGNAL, END_SIGNAL.length, channelIP, channelPort);
         try {
             this.socket.send(packet);
+            System.out.println("[Client " + uName + "] Sent END signal to channel.");
         } catch (IOException e) {
-            // If error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to send message", e);
+            System.out.println("[Client " + uName + "] ERROR: Failed to send END signal: " + e.getMessage());
         }
     }
 
+    // Receive a packet
     public DatagramPacket receive() {
-
-        // Check if the socket is functional
-        if (!validateSocket(this.socket)) {
+        if (!validateSocket(this.socket))
             return null;
-        }
 
-        // Create the packet
         DatagramPacket packet = new DatagramPacket(new byte[1024], 1024);
-
-        // Try receiving the packet
         try {
             this.socket.receive(packet);
         } catch (IOException e) {
-            // If an error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to receive message", e);
+            System.out.println("[Client " + uName + "] ERROR: Failed to receive message: " + e.getMessage());
         }
         return packet;
     }
 
-    /**
-     * Closes the socket and add info in the log.
-     */
+    // Close the socket
     public void close() {
         if (validateSocket(this.socket)) {
             this.socket.close();
-            this.logger.log(Level.INFO, "Socket closed.");
+            System.out.println("[Client " + uName + "] Socket closed.");
         }
     }
-
 }
