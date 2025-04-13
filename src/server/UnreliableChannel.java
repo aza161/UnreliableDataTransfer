@@ -5,9 +5,12 @@ import utils.Utils;
 
 import java.io.IOException;
 import java.net.*;
-import java.util.HashMap;
 import java.util.Random;
 import java.util.Scanner;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.FileHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -26,30 +29,30 @@ public class UnreliableChannel implements ReceiverClient {
     static class UserPair {
         String sender;
         String receiver;
-        int delayedMessages;
-        int LostMessages;
-        int totalMessages;
+        AtomicInteger delayedMessages;
+        AtomicInteger lostMessages;
+        AtomicInteger totalMessages;
         double averageDelay;
 
         public UserPair(String sender, String receiver) {
             this.sender = sender;
             this.receiver = receiver;
-            this.delayedMessages = 0;
-            this.LostMessages = 0;
-            this.totalMessages = 0;
+            this.delayedMessages = new AtomicInteger(0);
+            this.lostMessages = new AtomicInteger(0);
+            this.totalMessages = new AtomicInteger(0);
             this.averageDelay = 0;
         }
 
         @Override
         public String toString() {
-            return String.format("Average delay from %s to %s: %.1f ms.\n\"Packets received from user %s: %d " + "| Lost: %d | Delayed: %d", sender, receiver, averageDelay, sender, totalMessages, LostMessages, delayedMessages);
+            return String.format("Average delay from %s to %s: %.1f ms.\nPackets received from user %s: %d " + "| Lost: %d | Delayed: %d", sender, receiver, averageDelay, sender, totalMessages.get(), lostMessages.get(), delayedMessages.get());
         }
     }
 
     /**
      * Maps sender-receiver IP/port pairs to their communication statistics.
      */
-    private final HashMap<String, UserPair> userByIPMap;
+    private final ConcurrentHashMap<String, UserPair> userByIPMap;
 
     /**
      * {@link DatagramSocket} used for sending and receiving UDP packets.
@@ -111,7 +114,7 @@ public class UnreliableChannel implements ReceiverClient {
      * @throws RuntimeException         if socket initialization fails
      */
     public UnreliableChannel(int portNumber, double dropProbability, long minDelay, long maxDelay) {
-        this.userByIPMap = new HashMap<>();
+        this.userByIPMap = new ConcurrentHashMap<>();
 
         if (!utils.validatePort(portNumber)) {
             throw new IllegalArgumentException("Invalid port number: " + portNumber);
@@ -167,7 +170,7 @@ public class UnreliableChannel implements ReceiverClient {
         try {
             this.socket.setReceiveBufferSize(2 * 1024 * 1024);
         } catch (IOException e) {
-            this.logger.log(Level.SEVERE, "Failed to set the size of the socket buffer to 2GB", e);
+            this.logger.log(Level.SEVERE, "Failed to set the size of the socket buffer to 2MB", e);
         }
     }
 
@@ -187,7 +190,9 @@ public class UnreliableChannel implements ReceiverClient {
 
         UnreliableChannel uc = new UnreliableChannel(portNumber, dropProbability, minDelay, maxDelay);
 
-        int totalEND = 0; // Counts the total end messages received
+        AtomicInteger totalEND = new AtomicInteger(0); // Counts the total end messages received
+
+        ExecutorService service = Executors.newFixedThreadPool(8);
 
         while (true) {
             DatagramPacket pkt = uc.receive(); // Receive a packet
@@ -195,39 +200,52 @@ public class UnreliableChannel implements ReceiverClient {
             if (pkt == null) {
                 continue;
             }
-            // msg format: "uName destName destAdder destPort message"
-            String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength());
-            Scanner scanner = new Scanner(msg);
-            String senderName = scanner.next();
-            String destName = scanner.next();
-            String destAdder = scanner.next();
-            int destPort = scanner.nextInt();
 
-            if (!utils.validatePort(destPort) || !utils.validateIp(destAdder)) {
-                continue;
-            }
+            service.submit(() -> {
+                // msg format: "uName destName destAdder destPort message"
+                String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength());
+                Scanner scanner = new Scanner(msg);
+                String senderName = scanner.next();
+                String destName = scanner.next();
+                String destAdder = scanner.next();
+                int destPort = scanner.nextInt();
 
-            String message = scanner.next();
-            String senderKey = pkt.getAddress().toString() + pkt.getPort();
-            uc.userByIPMap.putIfAbsent(senderKey, new UserPair(senderName, destName));
+                if (!utils.validatePort(destPort) || !utils.validateIp(destAdder)) {
+                    Thread.currentThread().interrupt();
+                }
 
-            UserPair sender = uc.userByIPMap.get(senderKey);
-            // Check if it is end-of-transmission signal
-            boolean isEND = false;
-            if (message.equals("END")) {
-                System.out.println(sender);
-                totalEND++;
-                isEND = true;
-            }
+                String message = scanner.next();
+                String senderKey = pkt.getAddress().toString() + pkt.getPort();
+                uc.userByIPMap.putIfAbsent(senderKey, new UserPair(senderName, destName));
 
-            uc.send(destAdder, destPort, pkt, sender, senderKey, isEND);
+                UserPair sender = uc.userByIPMap.get(senderKey);
+                // Check if it is end-of-transmission signal
+                boolean isEND = false;
+                if (message.equals("END")) {
+                    try {
+                        Thread.sleep(10000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                    System.out.println(sender);
+                    totalEND.incrementAndGet();
+                    isEND = true;
+                }
 
-            if (totalEND == uc.userByIPMap.size()) {
+                try {
+                    uc.send(destAdder, destPort, pkt, sender, senderKey, isEND);
+                } catch (UnknownHostException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            if (!uc.userByIPMap.isEmpty() && totalEND.get() == uc.userByIPMap.size()) {
                 break;
             }
         }
-
         uc.close();
+        service.shutdown();
+        System.exit(0);
     }
 
     /**
@@ -255,7 +273,7 @@ public class UnreliableChannel implements ReceiverClient {
      * @throws UnknownHostException if destination address is invalid
      */
     private void send(String destAdder, int destPort, DatagramPacket pkt, UserPair sender, String senderKey, boolean isEND) throws UnknownHostException {
-        sender.totalMessages += 1;
+        sender.totalMessages.incrementAndGet();
 
         Random rand = new Random();
 
@@ -263,7 +281,7 @@ public class UnreliableChannel implements ReceiverClient {
 
 
         if (prob <= this.dropProbability && !isEND) {
-            sender.LostMessages += 1;
+            sender.lostMessages.incrementAndGet();
             return;
         }
 
@@ -274,17 +292,18 @@ public class UnreliableChannel implements ReceiverClient {
         } catch (InterruptedException e) {
             // If an interruption happens log it
             this.logger.log(Level.WARNING, "Sleep interrupted", e);
-            sender.LostMessages += 1;
+            sender.lostMessages.incrementAndGet();
             return;
         }
 
-        sender.averageDelay = computeNewAverageDelay(sender.averageDelay, sender.delayedMessages, delay);
-        sender.delayedMessages += 1;
+        synchronized (sender) {
+            sender.averageDelay = computeNewAverageDelay(sender.averageDelay, sender.delayedMessages.get(), delay);
+            sender.delayedMessages.incrementAndGet();
+        }
 
         pkt.setAddress(InetAddress.getByName(destAdder));
         pkt.setPort(destPort);
 
-        this.userByIPMap.replace(senderKey, sender);
         // Try to send packet
         try {
             this.socket.send(pkt);
@@ -310,6 +329,7 @@ public class UnreliableChannel implements ReceiverClient {
         } catch (IOException e) {
             // If an error is caught log it
             this.logger.log(Level.SEVERE, "Failed to receive message", e);
+            return null;
         }
         return packet;
     }
