@@ -1,163 +1,326 @@
 package server;
-// This program simulates an unreliable UDP network channel.
-// It receives packets from two clients, randomly drops or delays them,
-// and forwards them to the correct destination using dynamic IP and port data.
+
+import client.ReceiverClient;
+import utils.Utils;
 
 import java.io.IOException;
 import java.net.*;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Random;
+import java.util.Scanner;
+import java.util.logging.FileHandler;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
-public class UnreliableChannel {
 
+/**
+ * Simulates an unreliable UDP network channel that receives packets from clients,
+ * applies random packet dropping/delaying, and forwards them to destinations.
+ */
+public class UnreliableChannel implements ReceiverClient {
+
+    /**
+     * Internal data structure to track communication statistics
+     * between sender-receiver pairs.
+     */
+    static class UserPair {
+        String sender;
+        String receiver;
+        int delayedMessages;
+        int LostMessages;
+        int totalMessages;
+        double averageDelay;
+
+        public UserPair(String sender, String receiver) {
+            this.sender = sender;
+            this.receiver = receiver;
+            this.delayedMessages = 0;
+            this.LostMessages = 0;
+            this.totalMessages = 0;
+            this.averageDelay = 0;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("Average delay from %s to %s: %.1f ms.\n\"Packets received from user %s: %d " + "| Lost: %d | Delayed: %d", sender, receiver, averageDelay, sender, totalMessages, LostMessages, delayedMessages);
+        }
+    }
+
+    /**
+     * Maps sender-receiver IP/port pairs to their communication statistics.
+     */
+    private final HashMap<String, UserPair> userByIPMap;
+
+    /**
+     * {@link DatagramSocket} used for sending and receiving UDP packets.
+     */
+    private final DatagramSocket socket;
+
+    /**
+     * The port number on which this channel listens for and sends messages.
+     */
+    private final int portNumber;
+
+    /**
+     * Probability of dropping packets (0.0 to 1.0).
+     */
+    private final double dropProbability;
+
+    /**
+     * Minimum artificial delay applied to packets (milliseconds).
+     */
+    private final long minDelay;
+
+    /**
+     * Maximum artificial delay applied to packets (milliseconds).
+     */
+    private final long maxDelay;
+
+    /**
+     * Utility instance for validation and helper methods.
+     */
+    private final static Utils utils = new Utils();
+
+    /**
+     * Logger for recording channel activities and debugging information.
+     */
+    private final java.util.logging.Logger logger = Logger.getLogger(UnreliableChannel.class.getName());
+
+    /**
+     * Buffer size for receiving UDP packets (1KB).
+     */
     private static final int BUFFER_SIZE = 1024; // Buffer size for receiving packets
 
-    // Dynamic user tracking – we don’t hardcode names like "A" and "B"
-    private static String userA = null;
-    private static String userB = null;
+    /**
+     * Constructs an unreliable network channel with specified configuration.
+     * Initializes socket, validates parameters, and sets up logging.
+     * <p>
+     * The channel will:
+     * <ul>
+     *   <li>Listen on the specified port</li>
+     *   <li>Apply packet loss based on given probability</li>
+     *   <li>Introduce artificial delays within specified range</li>
+     *   <li>Track communication statistics</li>
+     * </ul>
+     *
+     * @param portNumber      Port to listen on (must be valid)
+     * @param dropProbability Probability of dropping packets [0.0, 1.0]
+     * @param minDelay        Minimum artificial delay (ms, >=0)
+     * @param maxDelay        Maximum artificial delay (ms, >=minDelay)
+     * @throws IllegalArgumentException if any parameter is invalid
+     * @throws RuntimeException         if socket initialization fails
+     */
+    public UnreliableChannel(int portNumber, double dropProbability, long minDelay, long maxDelay) {
+        this.userByIPMap = new HashMap<>();
 
-    // Statistics per user direction (userA -> userB, userB -> userA)
-    private static int receivedA = 0, droppedA = 0, delayedA = 0, delaySumA = 0;
-    private static int receivedB = 0, droppedB = 0, delayedB = 0, delaySumB = 0;
+        if (!utils.validatePort(portNumber)) {
+            throw new IllegalArgumentException("Invalid port number: " + portNumber);
+        }
+
+        try {
+            this.logger.addHandler(new FileHandler("UnreliableChannelLogs.txt", true));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        this.portNumber = portNumber;
+
+        DatagramSocket tempSocket = null;
+
+        try {
+            tempSocket = new DatagramSocket(this.portNumber);
+        } catch (SocketException e) {
+            this.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
+        } finally {
+            this.socket = tempSocket;
+            if (tempSocket != null) {
+                this.logger.log(Level.INFO, "UnreliableChannel socket initiated with port number: " + portNumber);
+                String info = String.format("[Channel] Drop probability: %f, Delay range: %d - %d ms\n", dropProbability, minDelay, maxDelay);
+                this.logger.log(Level.INFO, info);
+            }
+        }
+
+        if (!utils.validateProbability(dropProbability)) {
+            throw new IllegalArgumentException("Drop probability is out of range [0;1]: " + dropProbability);
+        }
+
+        this.dropProbability = dropProbability;
+
+        if (!utils.validateDelay(minDelay)) {
+            throw new IllegalArgumentException("Min delay is out of range [0;+inf): " + minDelay);
+        }
+        this.minDelay = minDelay;
+        if (!utils.validateDelay(maxDelay)) {
+            throw new IllegalArgumentException("Max delay is out of range [0;+inf): " + maxDelay);
+        }
+
+        if (minDelay > maxDelay) {
+            throw new IllegalArgumentException("Min delay cannot be larger than max delay");
+        }
+
+        this.maxDelay = maxDelay;
+
+        if (this.socket == null) {
+            throw new RuntimeException("Failed to initialize a socket");
+        }
+
+        try {
+            this.socket.setReceiveBufferSize(2 * 1024 * 1024);
+        } catch (IOException e) {
+            this.logger.log(Level.SEVERE, "Failed to set the size of the socket buffer to 2GB", e);
+        }
+    }
 
     public static void main(String[] args) throws IOException {
         // Expect exactly 4 arguments: port, dropProbability, minDelay, maxDelay
         if (args.length != 4) {
-            System.out.println("Usage: UnreliableChannel <port> <dropProbability> <minDelay> <maxDelay>");
-            return;
+            System.out.print("Usage: UnreliableChannel <port> <dropProbability> <minDelay> <maxDelay>\n");
+            System.exit(1);
         }
 
         // Parse arguments
-        int port = Integer.parseInt(args[0]);
+        int portNumber = Integer.parseInt(args[0]);
         double dropProbability = Double.parseDouble(args[1]);
-        int minDelay = Integer.parseInt(args[2]);
-        int maxDelay = Integer.parseInt(args[3]);
+        long minDelay = Long.parseLong(args[2]);
+        long maxDelay = Long.parseLong(args[3]);
 
-        DatagramSocket socket = new DatagramSocket(port);
-        byte[] buffer = new byte[BUFFER_SIZE];
-        Random rand = new Random();
 
-        System.out.println("[Channel] Started on port " + port);
-        System.out.println("[Channel] Drop probability: " + dropProbability + ", Delay range: " + minDelay + "-"
-                + maxDelay + " ms");
+        UnreliableChannel uc = new UnreliableChannel(portNumber, dropProbability, minDelay, maxDelay);
 
-        // Track which clients sent "END" to know when to stop
-        Set<String> endedUsers = new HashSet<>();
+        int totalEND = 0; // Counts the total end messages received
 
         while (true) {
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-            socket.receive(packet); // Wait for a UDP packet
+            DatagramPacket pkt = uc.receive(); // Receive a packet
+            // If the packet is null continue to the next iteration
+            if (pkt == null) {
+                continue;
+            }
+            // msg format: "uName destName destAdder destPort message"
+            String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength());
+            Scanner scanner = new Scanner(msg);
+            String senderName = scanner.next();
+            String destName = scanner.next();
+            String destAdder = scanner.next();
+            int destPort = scanner.nextInt();
 
-            String msg = new String(packet.getData(), packet.getOffset(), packet.getLength());
-            InetAddress senderIP = packet.getAddress();
-            int senderPort = packet.getPort();
-
-            // Handle "END" message to mark that a client has finished
-            if (msg.equals("END")) {
-                endedUsers.add(senderIP + ":" + senderPort);
-                System.out.println("[Channel] Received END from " + senderIP + ":" + senderPort);
-
-                if (endedUsers.size() == 2) {
-                    System.out.println("[Channel] Both clients ended. Exiting.");
-                    printStats(); // Show final stats before exiting
-                    break;
-                }
+            if (!utils.validatePort(destPort) || !utils.validateIp(destAdder)) {
                 continue;
             }
 
-            // Expect message format: <source> <destination> <destinationIP>
-            // <destinationPort> <message>
-            String[] parts = msg.split(" ", 5);
-            if (parts.length != 5) {
-                System.out.println("[Channel] Invalid message format: " + msg);
-                continue;
+            String message = scanner.next();
+            String senderKey = pkt.getAddress().toString() + pkt.getPort();
+            uc.userByIPMap.putIfAbsent(senderKey, new UserPair(senderName, destName));
+
+            UserPair sender = uc.userByIPMap.get(senderKey);
+            // Check if it is end-of-transmission signal
+            boolean isEND = false;
+            if (message.equals("END")) {
+                System.out.println(sender);
+                totalEND++;
+                isEND = true;
             }
 
-            String source = parts[0]; // Sender name (e.g., A or B)
-            String destination = parts[1]; // Destination name (e.g., B or A)
-            String destIPStr = parts[2]; // Destination IP
-            String destPortStr = parts[3]; // Destination port
-            String message = parts[4]; // The actual payload (e.g., 0 or 1)
+            uc.send(destAdder, destPort, pkt, sender, senderKey, isEND);
 
-            boolean drop = rand.nextDouble() <= dropProbability; // Should this packet be dropped?
-
-            // Assign sender name to userA or userB based on first occurrence
-            if (userA == null || userA.equals(source)) {
-                userA = source;
-                if (drop)
-                    droppedA++;
-                else {
-                    receivedA++;
-                }
-            } else {
-                userB = source;
-                if (drop)
-                    droppedB++;
-                else {
-                    receivedB++;
-                }
-            }
-
-            if (drop) {
-                System.out.println("[Channel] DROPPED packet from " + source + " to " + destination + ": " + message);
-                continue; // Drop the packet — don't forward
-            }
-
-            // Simulate delay (between minDelay and maxDelay)
-            int delay = minDelay + rand.nextInt(maxDelay - minDelay + 1);
-            try {
-                Thread.sleep(delay);
-            } catch (InterruptedException e) {
-                System.out.println("[Channel] Sleep interrupted");
-            }
-
-            // Add to delay statistics
-            if (source.equals(userA)) {
-                delaySumA += delay;
-                if (delay > 0)
-                    delayedA++;
-            } else {
-                delaySumB += delay;
-                if (delay > 0)
-                    delayedB++;
-            }
-
-            // Try to forward the message to the destination IP and port
-            try {
-                InetAddress destAddr = InetAddress.getByName(destIPStr);
-                int destPort = Integer.parseInt(destPortStr);
-
-                // Send only source/destination/message to receiving client
-                String forwarded = String.format("%s %s %s", source, destination, message);
-                byte[] data = forwarded.getBytes();
-                DatagramPacket forwardPacket = new DatagramPacket(data, data.length, destAddr, destPort);
-                socket.send(forwardPacket);
-
-                System.out.println("[Channel] RELAYED from " + source + " to " + destination + ": '" + message
-                        + "' with " + delay + " ms delay");
-
-            } catch (Exception e) {
-                System.out.println("[Channel] ERROR forwarding packet: " + e.getMessage());
+            if (totalEND == uc.userByIPMap.size()) {
+                break;
             }
         }
 
-        socket.close();
+        uc.close();
     }
 
-    // Print final communication statistics before shutting down
-    private static void printStats() {
-        System.out.println("\n--- Channel Statistics ---");
+    /**
+     * Calculates updated average delay using weighted average formula.
+     *
+     * @param CurrentAverageDelay current average delay value
+     * @param delayedMessages     number of previously delayed messages
+     * @param newDelay            newly applied delay duration
+     * @return updated average delay value
+     */
+    public double computeNewAverageDelay(double CurrentAverageDelay, int delayedMessages, double newDelay) {
+        return ((delayedMessages * CurrentAverageDelay) + newDelay) / (delayedMessages + 1);
+    }
 
-        System.out.printf("Packets received from user %s: %d | Lost: %d | Delayed: %d\n",
-                userA, receivedA + droppedA, droppedA, delayedA);
+    /**
+     * Processes and forwards a received packet with simulated network unreliability.
+     * Applies random packet dropping/delaying based on configuration parameters.
+     *
+     * @param destAdder destination client's IP address string
+     * @param destPort  destination client's listening port
+     * @param pkt       received packet to forward
+     * @param sender    user pair tracking communication statistics
+     * @param senderKey unique identifier for sender-receiver pair
+     * @param isEND     flag indicating if this is a termination signal
+     * @throws UnknownHostException if destination address is invalid
+     */
+    private void send(String destAdder, int destPort, DatagramPacket pkt, UserPair sender, String senderKey, boolean isEND) throws UnknownHostException {
+        sender.totalMessages += 1;
 
-        System.out.printf("Packets received from user %s: %d | Lost: %d | Delayed: %d\n",
-                userB, receivedB + droppedB, droppedB, delayedB);
+        Random rand = new Random();
 
-        System.out.printf("Average delay from %s to %s: %.1f ms.\n",
-                userA, userB, (receivedA == 0 ? 0 : (double) delaySumA / receivedA));
+        double prob = rand.nextDouble();
 
-        System.out.printf("Average delay from %s to %s: %.1f ms.\n",
-                userB, userA, (receivedB == 0 ? 0 : (double) delaySumB / receivedB));
+
+        if (prob <= this.dropProbability && !isEND) {
+            sender.LostMessages += 1;
+            return;
+        }
+
+        long delay = minDelay + rand.nextLong(maxDelay - minDelay + 1);
+
+        try {
+            Thread.sleep(delay);
+        } catch (InterruptedException e) {
+            // If an interruption happens log it
+            this.logger.log(Level.WARNING, "Sleep interrupted", e);
+            sender.LostMessages += 1;
+            return;
+        }
+
+        sender.averageDelay = computeNewAverageDelay(sender.averageDelay, sender.delayedMessages, delay);
+        sender.delayedMessages += 1;
+
+        pkt.setAddress(InetAddress.getByName(destAdder));
+        pkt.setPort(destPort);
+
+        this.userByIPMap.replace(senderKey, sender);
+        // Try to send packet
+        try {
+            this.socket.send(pkt);
+        } catch (IOException e) {
+            // If error is caught log it
+            this.logger.log(Level.SEVERE, "Failed to send message", e);
+        }
+    }
+
+    @Override
+    public DatagramPacket receive() {
+        // Check if the socket is functional
+        if (!utils.validateSocket(this.socket)) {
+            return null;
+        }
+
+        // Create the packet
+        DatagramPacket packet = new DatagramPacket(new byte[BUFFER_SIZE], BUFFER_SIZE);
+
+        // Try receiving the packet
+        try {
+            this.socket.receive(packet);
+        } catch (IOException e) {
+            // If an error is caught log it
+            this.logger.log(Level.SEVERE, "Failed to receive message", e);
+        }
+        return packet;
+    }
+
+    /**
+     * Closes the socket and add info in the log.
+     */
+    public void close() {
+        if (utils.validateSocket(this.socket)) {
+            this.socket.close();
+            this.logger.log(Level.INFO, "Socket closed.");
+        }
     }
 }
-
