@@ -14,20 +14,23 @@ public interface SenderClient {
     /**
      * Sends a message to the specified destination address and port.
      *
-     * @param message   the message to be transmitted.
-     * @param destName  the name of the destination.
-     * @param recvAdder the {@link InetAddress} of the receiver.
-     * @param port      the port number on which the receiver is listening.
+     * @param message      the message to be transmitted.
+     * @param destName     the name of the destination.
+     * @param destAdder    the {@link InetAddress} of the destination.
+     * @param destPort     the port number on which the receiver is listening.
+     * @param channelAdder the {@link InetAddress} of the channel.
+     * @param channelPort  the port number on which the channel is listening.
      */
-    void send(String message, String destName, InetAddress recvAdder, int port);
+    void send(String message, String destName, InetAddress destAdder, int destPort, InetAddress channelAdder, int channelPort);
 
     /**
-     * Sends an end-of-transmission message to the
-     * specified destination address and port
-     * to stop waiting for further messages.
+     * Sends a message to the specified destination address and port.
      *
-     * @param recvAdder the {@link InetAddress} of the receiver.
-     * @param port      the port number on which the receiver is listening.
+     * @param destName     the name of the destination.
+     * @param destAdder    the {@link InetAddress} of the destination.
+     * @param destPort     the port number on which the receiver is listening.
+     * @param channelAdder the {@link InetAddress} of the channel.
+     * @param channelPort  the port number on which the channel is listening.
      */
-    void sendEndSignal(InetAddress recvAdder, int port);
+    void sendEndSignal(String destName, InetAddress destAdder, int destPort, InetAddress channelAdder, int channelPort);
 }
