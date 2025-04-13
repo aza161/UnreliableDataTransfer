@@ -7,6 +7,7 @@ import java.util.logging.FileHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import utils.PacketGenerator;
 import utils.Utils;
 
 
@@ -43,7 +44,7 @@ public class UserClient implements ReceiverClient, SenderClient {
      */
     private final Logger logger = Logger.getLogger(UserClient.class.getName());
 
-    private final static int MESSAGES_TO_BE_SENT = 10;
+    private final static int MESSAGES_TO_BE_SENT = 100;
 
     private static final Utils utils = new Utils();
 
@@ -106,9 +107,10 @@ public class UserClient implements ReceiverClient, SenderClient {
 
         // A thread for sending packets
         Thread sendingThread = new Thread(() -> {
+            PacketGenerator pg = new PacketGenerator(512);
             int count = 0; // Count of packets sent
             while (count < MESSAGES_TO_BE_SENT) {
-                String message = messages[count % 2]; // Alternate the sequence number
+                String message = pg.generate(); // random message
                 // Note we are temporarily sending the messages directly to the
                 // destination/receiver since we didn't implement the channel yet
                 // and for test purposes
@@ -148,7 +150,7 @@ public class UserClient implements ReceiverClient, SenderClient {
                 String message = scanner.next();
                 // Check if it is end-of-transmission signal
                 if (message.equals("END")) {
-                    System.out.printf("Received END signal\nTotal messages received: " + count);
+                    System.out.printf("Received END signal\nTotal messages received: %d\n", count);
                     break;
                 }
                 count++;
@@ -265,9 +267,12 @@ public class UserClient implements ReceiverClient, SenderClient {
         // Try to send packet
         try {
             this.socket.send(packet);
+            Thread.sleep(200);
         } catch (IOException e) {
             // If error is caught log it
             this.logger.log(Level.SEVERE, "Failed to send message", e);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
         }
     }
 
