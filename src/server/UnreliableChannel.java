@@ -1,7 +1,6 @@
 package server;
 
 import client.ReceiverClient;
-import utils.Utils;
 
 import java.io.IOException;
 import java.net.*;
@@ -14,6 +13,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.FileHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import utils.Utils;
 
 
 /**
@@ -45,8 +46,17 @@ public class UnreliableChannel implements ReceiverClient {
 
         @Override
         public String toString() {
-            return String.format("Average delay from %s to %s: %.1f ms.\nPackets received from user %s: %d " + "| Lost: %d | Delayed: %d", sender, receiver, averageDelay, sender, totalMessages.get(), lostMessages.get(), delayedMessages.get());
+            return String.format("""
+                    Average delay from %s to %s: %.1f ms.
+                    Packets received from user %s: %d | Lost: %d | Delayed: %d""", sender, receiver, averageDelay, sender, totalMessages.get(), lostMessages.get(), delayedMessages.get());
         }
+    }
+
+    /**
+     * Enum to specify the delay distribution type
+     */
+    enum DelayDistribution {
+        U, G, E
     }
 
     /**
@@ -80,6 +90,11 @@ public class UnreliableChannel implements ReceiverClient {
     private final long maxDelay;
 
     /**
+     * Delay distribution type.
+     */
+    private final DelayDistribution delayType;
+
+    /**
      * Utility instance for validation and helper methods.
      */
     private final static Utils utils = new Utils();
@@ -87,12 +102,14 @@ public class UnreliableChannel implements ReceiverClient {
     /**
      * Logger for recording channel activities and debugging information.
      */
-    private final java.util.logging.Logger logger = Logger.getLogger(UnreliableChannel.class.getName());
+    private static final java.util.logging.Logger logger = Logger.getLogger(UnreliableChannel.class.getName());
 
     /**
      * Buffer size for receiving UDP packets (1KB).
      */
     private static final int BUFFER_SIZE = 1024; // Buffer size for receiving packets
+
+    Random rand = new Random();
 
     /**
      * Constructs an unreliable network channel with specified configuration.
@@ -110,18 +127,20 @@ public class UnreliableChannel implements ReceiverClient {
      * @param dropProbability Probability of dropping packets [0.0, 1.0]
      * @param minDelay        Minimum artificial delay (ms, >=0)
      * @param maxDelay        Maximum artificial delay (ms, >=minDelay)
+     * @param delayType       Delay Distribution (UNIFORM, GAUSSIAN, EXPONENTIAL)
      * @throws IllegalArgumentException if any parameter is invalid
      * @throws RuntimeException         if socket initialization fails
      */
-    public UnreliableChannel(int portNumber, double dropProbability, long minDelay, long maxDelay) {
+    public UnreliableChannel(int portNumber, double dropProbability, long minDelay, long maxDelay, DelayDistribution delayType) {
         this.userByIPMap = new ConcurrentHashMap<>();
+        this.delayType = delayType;
 
         if (!utils.validatePort(portNumber)) {
             throw new IllegalArgumentException("Invalid port number: " + portNumber);
         }
 
         try {
-            this.logger.addHandler(new FileHandler("UnreliableChannelLogs.txt", true));
+            UnreliableChannel.logger.addHandler(new FileHandler("UnreliableChannelLogs.xml"));
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -133,13 +152,13 @@ public class UnreliableChannel implements ReceiverClient {
         try {
             tempSocket = new DatagramSocket(this.portNumber);
         } catch (SocketException e) {
-            this.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
+            UnreliableChannel.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
         } finally {
             this.socket = tempSocket;
             if (tempSocket != null) {
-                this.logger.log(Level.INFO, "UnreliableChannel socket initiated with port number: " + portNumber);
+                UnreliableChannel.logger.log(Level.INFO, "UnreliableChannel socket initiated with port number: {0}", String.format("%d", portNumber));
                 String info = String.format("[Channel] Drop probability: %f, Delay range: %d - %d ms\n", dropProbability, minDelay, maxDelay);
-                this.logger.log(Level.INFO, info);
+                UnreliableChannel.logger.log(Level.INFO, info);
             }
         }
 
@@ -170,14 +189,14 @@ public class UnreliableChannel implements ReceiverClient {
         try {
             this.socket.setReceiveBufferSize(2 * 1024 * 1024);
         } catch (IOException e) {
-            this.logger.log(Level.SEVERE, "Failed to set the size of the socket buffer to 2MB", e);
+            UnreliableChannel.logger.log(Level.SEVERE, "Failed to set the size of the socket buffer to 2MB", e);
         }
     }
 
     public static void main(String[] args) throws IOException {
-        // Expect exactly 4 arguments: port, dropProbability, minDelay, maxDelay
-        if (args.length != 4) {
-            System.out.print("Usage: UnreliableChannel <port> <dropProbability> <minDelay> <maxDelay>\n");
+        // Expect exactly 5 arguments: port, dropProbability, minDelay, maxDelay, delayTypeStr
+        if (args.length != 5) {
+            System.out.print("Usage: UnreliableChannel <port> <dropProbability> <minDelay> <maxDelay> <delayType>\n");
             System.exit(1);
         }
 
@@ -186,9 +205,18 @@ public class UnreliableChannel implements ReceiverClient {
         double dropProbability = Double.parseDouble(args[1]);
         long minDelay = Long.parseLong(args[2]);
         long maxDelay = Long.parseLong(args[3]);
+        String delayTypeStr = args[4].toUpperCase();
 
+        DelayDistribution delayType = DelayDistribution.U;
 
-        UnreliableChannel uc = new UnreliableChannel(portNumber, dropProbability, minDelay, maxDelay);
+        try {
+            delayType = DelayDistribution.valueOf(delayTypeStr);
+        } catch (IllegalArgumentException e) {
+            System.out.println("Invalid delay type. Use: (U)NIFORM, (G)AUSSIAN, or (E)XPONENTIAL.");
+            System.exit(1);
+        }
+
+        UnreliableChannel uc = new UnreliableChannel(portNumber, dropProbability, minDelay, maxDelay, delayType);
 
         AtomicInteger totalEND = new AtomicInteger(0); // Counts the total end messages received
 
@@ -204,17 +232,21 @@ public class UnreliableChannel implements ReceiverClient {
             service.submit(() -> {
                 // msg format: "uName destName destAdder destPort message"
                 String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength());
-                Scanner scanner = new Scanner(msg);
-                String senderName = scanner.next();
-                String destName = scanner.next();
-                String destAdder = scanner.next();
-                int destPort = scanner.nextInt();
-
-                if (!utils.validatePort(destPort) || !utils.validateIp(destAdder)) {
-                    Thread.currentThread().interrupt();
+                String senderName;
+                String destName;
+                String destAdder;
+                int destPort;
+                String message;
+                try (Scanner scanner = new Scanner(msg)) {
+                    senderName = scanner.next();
+                    destName = scanner.next();
+                    destAdder = scanner.next();
+                    destPort = scanner.nextInt();
+                    if (!utils.validatePort(destPort) || !utils.validateIp(destAdder)) {
+                        Thread.currentThread().interrupt();
+                    }
+                    message = scanner.next();
                 }
-
-                String message = scanner.next();
                 String senderKey = pkt.getAddress().toString() + pkt.getPort();
                 uc.userByIPMap.putIfAbsent(senderKey, new UserPair(senderName, destName));
 
@@ -233,7 +265,7 @@ public class UnreliableChannel implements ReceiverClient {
                 }
 
                 try {
-                    uc.send(destAdder, destPort, pkt, sender, senderKey, isEND);
+                    uc.send(destAdder, destPort, pkt, sender, isEND);
                 } catch (UnknownHostException e) {
                     throw new RuntimeException(e);
                 }
@@ -261,6 +293,35 @@ public class UnreliableChannel implements ReceiverClient {
     }
 
     /**
+     * Computes a random delay based on the selected delay distribution.
+     * <p>
+     * This method supports three types of distributions:
+     * <ul>
+     *     <li><b>UNIFORM:</b> Evenly selects a delay within the [minDelay, maxDelay] range.</li>
+     *     <li><b>GAUSSIAN:</b> Uses a normal distribution centered between min and max delay
+     *         with 99.7% of values within the range (clamped).</li>
+     *     <li><b>EXPONENTIAL:</b> Models shorter delays more frequently with a long tail,
+     *         using a λ based on the average delay.</li>
+     * </ul>
+     *
+     * @return a delay in milliseconds, sampled according to the specified distribution
+     */
+    private long getDelayBasedOnDistribution() {
+        switch (this.delayType) {
+            case G:
+                double gaussian = rand.nextGaussian() * (maxDelay - minDelay) / 6.0 + (minDelay + maxDelay) / 2.0;
+                return Math.max(minDelay, Math.min(maxDelay, (long) gaussian));
+            case E:
+                double lambda = 1.0 / ((minDelay + maxDelay) / 2.0);
+                double exponential = -Math.log(1 - rand.nextDouble()) / lambda;
+                return Math.max(minDelay, Math.min(maxDelay, (long) exponential));
+            case U:
+            default:
+                return minDelay + rand.nextLong(maxDelay - minDelay + 1);
+        }
+    }
+
+    /**
      * Processes and forwards a received packet with simulated network unreliability.
      * Applies random packet dropping/delaying based on configuration parameters.
      *
@@ -272,10 +333,8 @@ public class UnreliableChannel implements ReceiverClient {
      * @param isEND     flag indicating if this is a termination signal
      * @throws UnknownHostException if destination address is invalid
      */
-    private void send(String destAdder, int destPort, DatagramPacket pkt, UserPair sender, String senderKey, boolean isEND) throws UnknownHostException {
+    private void send(String destAdder, int destPort, DatagramPacket pkt, UserPair sender, boolean isEND) throws UnknownHostException {
         sender.totalMessages.incrementAndGet();
-
-        Random rand = new Random();
 
         double prob = rand.nextDouble();
 
@@ -285,13 +344,13 @@ public class UnreliableChannel implements ReceiverClient {
             return;
         }
 
-        long delay = minDelay + rand.nextLong(maxDelay - minDelay + 1);
+        long delay = getDelayBasedOnDistribution();
 
         try {
             Thread.sleep(delay);
         } catch (InterruptedException e) {
             // If an interruption happens log it
-            this.logger.log(Level.WARNING, "Sleep interrupted", e);
+            UnreliableChannel.logger.log(Level.WARNING, "Sleep interrupted", e);
             sender.lostMessages.incrementAndGet();
             return;
         }
@@ -309,7 +368,7 @@ public class UnreliableChannel implements ReceiverClient {
             this.socket.send(pkt);
         } catch (IOException e) {
             // If error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to send message", e);
+            UnreliableChannel.logger.log(Level.SEVERE, "Failed to send message", e);
         }
     }
 
@@ -328,7 +387,7 @@ public class UnreliableChannel implements ReceiverClient {
             this.socket.receive(packet);
         } catch (IOException e) {
             // If an error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to receive message", e);
+            UnreliableChannel.logger.log(Level.SEVERE, "Failed to receive message", e);
             return null;
         }
         return packet;
@@ -340,7 +399,7 @@ public class UnreliableChannel implements ReceiverClient {
     public void close() {
         if (utils.validateSocket(this.socket)) {
             this.socket.close();
-            this.logger.log(Level.INFO, "Socket closed.");
+            UnreliableChannel.logger.log(Level.INFO, "Socket closed.");
         }
     }
 }
