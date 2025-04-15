@@ -42,7 +42,7 @@ public class UserClient implements ReceiverClient, SenderClient {
     /**
      * The logger for recording client activities and debugging information.
      */
-    private final Logger logger = Logger.getLogger(UserClient.class.getName());
+    private static final Logger logger = Logger.getLogger(UserClient.class.getName());
 
     private final static int MESSAGES_TO_BE_SENT = 100;
 
@@ -51,8 +51,8 @@ public class UserClient implements ReceiverClient, SenderClient {
     public static void main(String[] args) throws IOException {
 
         // Check if all arguments are passed
-        if (args.length < 7) {
-            System.out.print("Usage: UserClient <userName> <portNumber> <channelIP> <channelPort> <destinationName> <destinationIP> <destinationPort>\n");
+        if (args.length != 8) {
+            System.out.print("Usage: UserClient <userName> <portNumber> <channelIP> <channelPort> <destinationName> <destinationIP> <destinationPort> <packetDistribution>\n");
             System.exit(1);
         }
 
@@ -102,12 +102,18 @@ public class UserClient implements ReceiverClient, SenderClient {
         // Parse the channel port number into an int
         int destPort = Integer.parseInt(args[6]);
 
+        String distribution = args[7].toUpperCase();
+
+        if (!utils.validateDistribution(distribution)) {
+            UserClient.logger.log(Level.WARNING, "A wrong input for distribution was provided\nDefaulted to uniform distribution!");
+        }
+
         // The alternating sequence numbers of the message
-        String[] messages = {"0", "1"};
+        // String[] messages = {"0", "1"};
 
         // A thread for sending packets
         Thread sendingThread = new Thread(() -> {
-            PacketGenerator pg = new PacketGenerator(512);
+            PacketGenerator pg = new PacketGenerator(512, distribution);
             int count = 0; // Count of packets sent
             while (count < MESSAGES_TO_BE_SENT) {
                 String message = pg.generate(); // random message
@@ -120,14 +126,14 @@ public class UserClient implements ReceiverClient, SenderClient {
                     Thread.sleep(500); // Delay between each message 0.5 sec
                 } catch (InterruptedException e) {
                     // If an interruption happens log it
-                    uc.logger.log(Level.WARNING, "Sleep interrupted", e);
+                    UserClient.logger.log(Level.WARNING, "Sleep interrupted", e);
                     // Stop the thread
                     Thread.currentThread().interrupt();
                     // Exit the loop
                     break;
                 }
             }
-            // After all the 1000 packets are sent
+            // After all the MESSAGES_TO_BE_SENT are sent
             // Send end-of-transmission signal
             uc.sendEndSignal(destName, destAdder, destPort, channelAdder, channelPort);
         });
@@ -143,24 +149,31 @@ public class UserClient implements ReceiverClient, SenderClient {
                 }
                 // Get the message from the packet
                 String msg = new String(pkt.getData(), pkt.getOffset(), pkt.getLength());
-                Scanner scanner = new Scanner(msg);
-                for (int i = 0; i < 4; i++) {
-                    scanner.next();
+                try (Scanner scanner = new Scanner(msg)) {
+                    for (int i = 0; i < 4; i++) {
+                        scanner.next();
+                    }
+                    String message = scanner.next();
+                    // Check if it is end-of-transmission signal
+                    if (message.equals("END")) {
+                        UserClient.logger.log(Level.INFO, "Received END signal\nTotal messages received: {0}\n", String.format("%d", count));
+                        break;
+                    }
+                    count++;
+                    System.out.println(message);
                 }
-                String message = scanner.next();
-                // Check if it is end-of-transmission signal
-                if (message.equals("END")) {
-                    System.out.printf("Received END signal\nTotal messages received: %d\n", count);
-                    break;
-                }
-                count++;
-                System.out.println(message);
             }
         });
 
         // Start the threads
-        sendingThread.start();
         receivingThread.start();
+        UserClient.logger.log(Level.INFO, "Socket Listening on port: {0}", String.format("%d", portNumber));
+        System.out.println("Press enter to start sending messages...");
+        Scanner sc = new Scanner(System.in);
+        sc.nextLine();
+        sc.close();
+        UserClient.logger.log(Level.INFO, "Started Sending Messages!");
+        sendingThread.start();
 
         // Try to join the threads back to the main thread
         try {
@@ -168,7 +181,7 @@ public class UserClient implements ReceiverClient, SenderClient {
             sendingThread.join();
         } catch (InterruptedException e) {
             // If interruption occurs log it
-            uc.logger.log(Level.SEVERE, "Interrupted while waiting for sending receiving thread", e);
+            UserClient.logger.log(Level.SEVERE, "Interrupted while waiting for sending receiving thread", e);
         }
 
         // Close the socket
@@ -194,7 +207,7 @@ public class UserClient implements ReceiverClient, SenderClient {
         this.uName = uName;
 
         try {
-            this.logger.addHandler(new FileHandler("ClientLog.txt", true));
+            UserClient.logger.addHandler(new FileHandler("ClientLog.xml"));
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -204,11 +217,11 @@ public class UserClient implements ReceiverClient, SenderClient {
         try {
             tempSocket = new DatagramSocket(portNumber);
         } catch (SocketException e) {
-            this.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
+            UserClient.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
         } finally {
             this.socket = tempSocket;
             if (tempSocket != null) {
-                this.logger.log(Level.INFO, "UserClient socket initiated with port number: " + portNumber);
+                UserClient.logger.log(Level.INFO, "UserClient socket initiated with port number: {0}", String.format("%d", portNumber));
             }
         }
 
@@ -250,10 +263,11 @@ public class UserClient implements ReceiverClient, SenderClient {
             this.socket.send(packet);
         } catch (IOException e) {
             // If error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to send message", e);
+            UserClient.logger.log(Level.SEVERE, "Failed to send message", e);
         }
     }
 
+    @Override
     public void sendEndSignal(String destName, InetAddress destAdder, int destPort, InetAddress channelAdder, int channelPort) {
 
         // Check if all parameters are valid
@@ -270,12 +284,13 @@ public class UserClient implements ReceiverClient, SenderClient {
             Thread.sleep(200);
         } catch (IOException e) {
             // If error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to send message", e);
+            UserClient.logger.log(Level.SEVERE, "Failed to send message", e);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
     }
 
+    @Override
     public DatagramPacket receive() {
 
         // Check if the socket is functional
@@ -291,7 +306,7 @@ public class UserClient implements ReceiverClient, SenderClient {
             this.socket.receive(packet);
         } catch (IOException e) {
             // If an error is caught log it
-            this.logger.log(Level.SEVERE, "Failed to receive message", e);
+            UserClient.logger.log(Level.SEVERE, "Failed to receive message", e);
         }
         return packet;
     }
@@ -302,7 +317,7 @@ public class UserClient implements ReceiverClient, SenderClient {
     public void close() {
         if (utils.validateSocket(this.socket)) {
             this.socket.close();
-            this.logger.log(Level.INFO, "Socket closed.");
+            UserClient.logger.log(Level.INFO, "Socket closed.");
         }
     }
 
