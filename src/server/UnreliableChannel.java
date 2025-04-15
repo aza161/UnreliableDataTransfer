@@ -329,7 +329,6 @@ public class UnreliableChannel implements ReceiverClient {
      * @param destPort  destination client's listening port
      * @param pkt       received packet to forward
      * @param sender    user pair tracking communication statistics
-     * @param senderKey unique identifier for sender-receiver pair
      * @param isEND     flag indicating if this is a termination signal
      * @throws UnknownHostException if destination address is invalid
      */
