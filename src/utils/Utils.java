@@ -3,6 +3,7 @@ package utils;
 import java.io.IOException;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.logging.FileHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -16,11 +17,11 @@ public class Utils {
     /**
      * Logger for recording utility operations and validation errors.
      */
-    private final java.util.logging.Logger logger = Logger.getLogger(Utils.class.getName());
+    private static final java.util.logging.Logger logger = Logger.getLogger(Utils.class.getName());
 
     public Utils() {
         try {
-            this.logger.addHandler(new FileHandler("UtilsLog.txt", true));
+            logger.addHandler(new FileHandler("UtilsLog.xml"));
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -36,7 +37,7 @@ public class Utils {
      */
     public boolean validatePort(int port) {
         if (port < 1025 || port > 65535) {
-            this.logger.log(Level.SEVERE, "Port out of range (0 - 65535): " + port);
+            logger.log(Level.SEVERE, "Port out of range (0 - 65535): {0}", String.format("%d", port));
             return false;
         }
         return true;
@@ -51,13 +52,13 @@ public class Utils {
      */
     public boolean validateIp(String ip) {
         if (ip == null || ip.isEmpty()) {
-            this.logger.log(Level.SEVERE, "Invalid IP address: " + ip);
+            logger.log(Level.SEVERE, "Invalid IP address: {0}", ip);
         }
         try {
             InetAddress.getByName(ip);
             return true;
-        } catch (Exception e) {
-            this.logger.log(Level.SEVERE, "Invalid IP address: " + ip);
+        } catch (UnknownHostException e) {
+            logger.log(Level.SEVERE, "Invalid IP address: {0}", ip);
             return false;
         }
     }
@@ -71,7 +72,7 @@ public class Utils {
      */
     public boolean validateAddress(InetAddress address) {
         if (address == null) {
-            this.logger.log(Level.SEVERE, "recvAdder is null");
+            logger.log(Level.SEVERE, "recvAdder is null");
             return false;
         }
         return true;
@@ -86,7 +87,7 @@ public class Utils {
      */
     public boolean validateSocket(DatagramSocket socket) {
         if (socket == null || socket.isClosed()) {
-            this.logger.log(Level.SEVERE, "UserClient socket is closed");
+            logger.log(Level.SEVERE, "UserClient socket is closed");
             return false;
         }
         return true;
@@ -117,7 +118,7 @@ public class Utils {
      */
     public boolean validateProbability(double probability) {
         if (probability < 0 || probability > 1) {
-            this.logger.log(Level.SEVERE, "Probability out of range: " + probability);
+            logger.log(Level.SEVERE, "Probability out of range: {0}", String.format("%f", probability));
             return false;
         }
         return true;
@@ -132,9 +133,29 @@ public class Utils {
      */
     public boolean validateDelay(long delay) {
         if (delay < 0) {
-            this.logger.log(Level.SEVERE, "Delay out of range (0-inf): " + delay);
+            logger.log(Level.SEVERE, "Delay out of range (0-inf): {0}", String.format("%dl", delay));
             return false;
         }
         return true;
+    }
+
+
+    /**
+     * Validates the distribution type input and logs an error if invalid.
+     * Acceptable values are "U" (Uniform) and "P" (Poisson).
+     *
+     * @param distribution The distribution type to be validated.
+     * @return true if the distribution is valid, false otherwise.
+     */
+    public boolean validateDistribution(String distribution) {
+        switch (distribution) {
+            case "U":
+                return true;
+            case "P":
+                return true;
+            default:
+                logger.log(Level.INFO, "WRONG DISTRIBUTION INPUT");
+                return false;
+        }
     }
 }
