@@ -37,7 +37,8 @@ public class Utils {
      */
     public boolean validatePort(int port) {
         if (port < 1025 || port > 65535) {
-            logger.log(Level.SEVERE, "Port out of range (0 - 65535): {0}", String.format("%d", port));
+            logger.log(Level.SEVERE, "Port out of range (0 - 65535): {0}", 
+            String.format("%d", port));
             return false;
         }
         return true;
@@ -118,7 +119,8 @@ public class Utils {
      */
     public boolean validateProbability(double probability) {
         if (probability < 0 || probability > 1) {
-            logger.log(Level.SEVERE, "Probability out of range: {0}", String.format("%f", probability));
+            logger.log(Level.SEVERE, "Probability out of range: {0}", 
+            String.format("%f", probability));
             return false;
         }
         return true;
