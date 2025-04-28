@@ -1,5 +1,6 @@
 package utils;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -37,8 +38,7 @@ public class Utils {
      */
     public boolean validatePort(int port) {
         if (port < 1025 || port > 65535) {
-            logger.log(Level.SEVERE, "Port out of range (0 - 65535): {0}", 
-            String.format("%d", port));
+            logger.log(Level.SEVERE, "Port out of range (0 - 65535): {0}", String.format("%d", port));
             return false;
         }
         return true;
@@ -102,6 +102,9 @@ public class Utils {
      * @return true if the String is an integer otherwise false
      */
     public boolean validateInt(String number) {
+        if (number == null) {
+            return false;
+        }
         try {
             int num = Integer.parseInt(number);
             return true;
@@ -119,8 +122,7 @@ public class Utils {
      */
     public boolean validateProbability(double probability) {
         if (probability < 0 || probability > 1) {
-            logger.log(Level.SEVERE, "Probability out of range: {0}", 
-            String.format("%f", probability));
+            logger.log(Level.SEVERE, "Probability out of range: {0}", String.format("%f", probability));
             return false;
         }
         return true;
@@ -159,5 +161,25 @@ public class Utils {
                 logger.log(Level.INFO, "WRONG DISTRIBUTION INPUT");
                 return false;
         }
+    }
+
+    /**
+     * Validates that a sequence number fits within 18 bits.
+     *
+     * @param sequenceNumber the sequence number to check
+     * @return {@code true} if 0 <= sequenceNumber < 2^18, {@code false} otherwise
+     */
+    public boolean validateSequenceNumber(int sequenceNumber) {
+        return sequenceNumber < (1 << 18) && sequenceNumber >= 0;
+    }
+
+    /**
+     * Validates that a File exists, is a regular file, and is readable.
+     *
+     * @param file the File to check
+     * @return {@code true} if the file exists, is not a directory, and can be read
+     */
+    public boolean validateFile(File file) {
+        return (file.exists() && file.canRead() && file.isFile());
     }
 }
