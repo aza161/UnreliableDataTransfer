@@ -5,6 +5,8 @@ import rudp.RUDPSource;
 import java.io.File;
 import java.io.IOException;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.BufferedOutputStream;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,6 +32,12 @@ public class FileProcessor {
      * Utilities for file and network validations.
      */
     private static final Utils utils = new Utils();
+
+    /** File output stream for writing the received file. */
+    private FileOutputStream fos = null;
+
+    /** Buffered stream to improve file writing efficiency. */
+    private BufferedOutputStream bos = null;
 
     /**
      * Constructs a FileProcessor, initializing logging to a file.
@@ -140,6 +148,49 @@ public class FileProcessor {
             window.put(currentSequenceNumber, info);
             index++;
             currentSequenceNumber = (currentSequenceNumber + 1) % (RUDPSource.maximumSequenceNumber + 1);
+        }
+    }
+
+    /**
+     * Initializes the output file for writing received chunks.
+     * @param filename Full path to the output file to be created
+     */
+    public void startReconstruction(String filename) {
+        try {
+            File outFile = new File(filename);
+            fos = new FileOutputStream(outFile);
+            bos = new BufferedOutputStream(fos);
+            logger.info("[FILE CREATED] " + filename);
+        } catch (IOException e) {
+            logger.log(Level.SEVERE, "Failed to create output file: " + filename, e);
+        }
+    }
+
+    /**
+     * Writes a chunk of received payload to the file.
+     * @param chunkData Payload data in order
+     */
+    public void writeChunk(byte[] chunkData) {
+        try {
+            if (bos != null) {
+                bos.write(chunkData);
+                bos.flush();
+            }
+        } catch (IOException e) {
+            logger.log(Level.SEVERE, "Error writing chunk to file", e);
+        }
+    }
+
+    /**
+     * Finalizes and closes the file output stream.
+     */
+    public void close() {
+        try {
+            if (bos != null) bos.close();
+            if (fos != null) fos.close();
+            logger.info("[FILE SAVED] Output file closed.");
+        } catch (IOException e) {
+            logger.log(Level.SEVERE, "Error closing file output stream", e);
         }
     }
 }
