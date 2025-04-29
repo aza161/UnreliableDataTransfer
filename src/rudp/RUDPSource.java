@@ -1,9 +1,6 @@
 package rudp;
 
-import utils.Utils;
-import utils.PacketInfo;
-import utils.FileProcessor;
-import utils.PacketProcessor;
+import utils.*;
 
 
 import java.net.*;
@@ -123,6 +120,11 @@ public class RUDPSource {
     private final AtomicLong totalPacketsSent = new AtomicLong(0);
 
     /**
+     * Used to keep tack of the payload index.
+     */
+    private long index = 0;
+
+    /**
      * The previous total number of packets sent.
      * Used for additive increase computations.
      */
@@ -209,7 +211,10 @@ public class RUDPSource {
     }
 
 
-    public RUDPSource(InetAddress receiverHost, int receiverPort, File file, int port) {
+    public RUDPSource(InetAddress receiverHost,
+                      int receiverPort,
+                      File file,
+                      int port) {
         if (!utils.validateFile(file)) {
             String errorMsg = "File provided cannot be read or is a directory: " + file.toString();
             RUDPSource.logger.log(Level.SEVERE, errorMsg);
@@ -243,17 +248,12 @@ public class RUDPSource {
             e.printStackTrace();
         }
 
-        DatagramSocket tempSocket = null;
-
         try {
-            tempSocket = new DatagramSocket(port);
+            this.socket = new DatagramSocket(port);
+            RUDPSource.logger.log(Level.INFO, "UserClient socket initiated with port number: " + port);
         } catch (SocketException e) {
-            RUDPSource.logger.log(Level.SEVERE, "Failed to initialize a socket", e);
-        } finally {
-            this.socket = tempSocket;
-            if (tempSocket != null) {
-                RUDPSource.logger.log(Level.INFO, "UserClient socket initiated with port number: {0}", String.format("%d", port));
-            }
+            RUDPSource.logger.log(Level.SEVERE, "Failed to initialize a socket on port " + port, e);
+            throw new RuntimeException("Failed to initialize a socket", e);
         }
 
         this.receiverHost = receiverHost;
@@ -261,10 +261,6 @@ public class RUDPSource {
         this.prevTotalPacketsSent = new AtomicLong(0);
 
         this.receiverPort = receiverPort;
-
-        if (this.socket == null) {
-            throw new RuntimeException("Failed to initialize a socket");
-        }
     }
 
     /**
@@ -292,7 +288,7 @@ public class RUDPSource {
             // If an error is caught log it
             RUDPSource.logger.log(Level.SEVERE, "Failed to receive message", e);
         }
-        return packet;
+        return null;
     }
 
     /**
@@ -342,7 +338,6 @@ public class RUDPSource {
         // This function still has no way to deal with duplicate ACKs
         int totalACKs = sequenceAckCount.computeIfAbsent(seqNum, k -> new AtomicInteger(0)).incrementAndGet();
 
-        this.sequenceAckCount.put(seqNum, new AtomicInteger(totalACKs));
 
         if (totalACKs == 1) {
             // increment the total packets sent
@@ -378,8 +373,10 @@ public class RUDPSource {
             // multiply the cwnd_size by 0.5
             this.congestionWindowSize.set(currentCongestionWindowSize / 2);
 
-            long nextRTO = Math.min(RTO.get() * 2, maximumTimeOut);
-            RTO.set(nextRTO);
+            if (totalACKs > 3) {
+                long nextRTO = Math.min(RTO.get() * 2, maximumTimeOut);
+                RTO.set(nextRTO);
+            }
         }
 
         // if the total packets sent are less than ssthreshold we increment the cwnd_size.
@@ -412,7 +409,6 @@ public class RUDPSource {
             }
             socket.send(packetInfo.packet);
             packetInfo.lastSentTime = Instant.now().toEpochMilli();
-            window.put(sequenceNumber, packetInfo);
             sequenceAckCount.put(sequenceNumber, new AtomicInteger(0));
             logger.log(Level.INFO, "[DATA TRANSMISSION]: " + packetInfo.start + " | " + packetInfo.length);
         } catch (IOException e) {
@@ -463,8 +459,10 @@ public class RUDPSource {
         assert recvPort != null;
         int destPort = Integer.parseInt(recvPort);
 
+        FileProcessor fp = new FileProcessor();
+
         assert fileName != null;
-        File file = new File(fileName);
+        File file = fp.getFile(fileName);
 
         if (!utils.validateFile(file)) {
             throw new IllegalArgumentException("Invalid file, file either does not exist or cannot be read!");
@@ -472,13 +470,12 @@ public class RUDPSource {
 
         RUDPSource rudpSource = new RUDPSource(destHost, destPort, file, RUDPSource.PORT);
 
-        FileProcessor fp = new FileProcessor();
-
         // In bytes
         int payloadLength = RUDPSource.MSS - RUDPSource.HEADER_SIZE;
 
         // Fill the current cwnd with packets.
-        fp.fillWindow(rudpSource.window, file, 0, payloadLength, rudpSource.congestionWindowSize.get(), 0, destHost, destPort);
+        fp.fillWindow(rudpSource.window, file, 0, payloadLength, rudpSource.congestionWindowSize.get(), destHost, destPort);
+        rudpSource.index = rudpSource.window.size();
 
         Thread sendingThread = new Thread(() -> {
             int currentSequenceNumber = 0;
@@ -489,17 +486,17 @@ public class RUDPSource {
             // repeat until all packets are sent.
             while (rudpSource.totalPacketsSent.get() < totalPackets) {
                 // check if the cwnd is empty and refill it.
-                if (rudpSource.window.isEmpty()) {
-                    fp.fillWindow(rudpSource.window, file, rudpSource.totalPacketsSent.get(), payloadLength, rudpSource.congestionWindowSize.get(), currentSequenceNumber, destHost, destPort);
+                if (rudpSource.window.size() < rudpSource.congestionWindowSize.get()) {
+                    rudpSource.index += fp.fillWindow(rudpSource.window, file, rudpSource.index, payloadLength, rudpSource.congestionWindowSize.get(), destHost, destPort);
                     continue;
                 }
 
-                // Skip it if it was already transmitted.
-                if (rudpSource.window.get(currentSequenceNumber).lastSentTime != 0) {
-                    currentSequenceNumber++;
+                PacketInfo packetInfo = rudpSource.window.get(currentSequenceNumber);
+                if (packetInfo == null || packetInfo.lastSentTime != 0) {
+                    // Packet doesn't exist in window or already sent/being handled
+                    currentSequenceNumber = (currentSequenceNumber + 1) % (maximumSequenceNumber + 1); // Advance check to next potential seqNum
                     continue;
                 }
-
 
                 rudpSource.sendPacket(currentSequenceNumber);
                 // set the time of sending the packet to the current time
@@ -531,6 +528,22 @@ public class RUDPSource {
             sendingThread.join();
         } catch (InterruptedException e) {
             RUDPSource.logger.log(Level.SEVERE, "Interrupted while waiting for sending receiving thread", e);
+        }
+
+        fp.close();
+
+        try {
+            Thread.sleep(15000);
+            int i = 3;
+            // Send END Signal three times just in case it's lost
+            // I'm too lazy to implement ACKs for END Signal.
+            while (i-- > 0) {
+                rudpSource.socket.send(PacketProcessor.buildEndPacket(destHost, destPort));
+            }
+        } catch (InterruptedException e) {
+            logger.log(Level.SEVERE, "Failed to wait before sending END signal", e);
+        } catch (IOException e) {
+            logger.log(Level.SEVERE, "Failed to send END signal!", e);
         }
 
         rudpSource.shutdown();
