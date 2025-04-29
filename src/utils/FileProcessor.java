@@ -151,6 +151,9 @@ public class FileProcessor {
                 return total;
             }
             byte[] payload = getPayload(file, index, size);
+            if (payload == null) {
+                return total;
+            }
             DatagramPacket packet = PacketProcessor.buildDataPacket(
                     payload, currentSequenceNumber,
                     receiverHost, receiverPort);
