@@ -40,6 +40,14 @@ public class PacketProcessor {
         }
     }
 
+    static {
+        try {
+            logger.addHandler(new FileHandler("PacketProcessorLog.xml"));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
     /**
      * Builds a DATA packet containing a custom RUDP header and payload.
      *
@@ -118,6 +126,37 @@ public class PacketProcessor {
         }
         // Zero payload length
         buf.putShort((short) 0);
+
+        return new DatagramPacket(buf.array(), buf.capacity(), receiverHost, receiverPort);
+    }
+
+
+    /**
+     * Constructs a UDP datagram packet representing an "END" message.
+     * <p>
+     * This method creates a datagram packet with a single byte indicating the "END" message type,
+     * and prepares it for transmission to the specified receiver host and port.
+     * </p>
+     *
+     * @param receiverHost The {@link InetAddress} of the receiver's host.
+     * @param receiverPort The destination port number on the receiver's host.
+     * @return A {@link DatagramPacket} containing the "END" message, or {@code null} if
+     * the provided host address or port is invalid.
+     */
+    public static DatagramPacket buildEndPacket(InetAddress receiverHost,
+                                                int receiverPort) {
+        if (!utils.validatePort(receiverPort)) {
+            logger.log(Level.SEVERE, "Invalid receiver port number: " + receiverPort);
+            return null;
+        }
+        if (!utils.validateAddress(receiverHost)) {
+            logger.log(Level.SEVERE, "Invalid Destination IP address");
+            return null;
+        }
+
+        ByteBuffer buf = ByteBuffer.allocate(RUDPSource.HEADER_SIZE);
+        // Type byte: 2 = END
+        buf.put((byte) 2);
 
         return new DatagramPacket(buf.array(), buf.capacity(), receiverHost, receiverPort);
     }
