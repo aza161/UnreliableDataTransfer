@@ -2,11 +2,7 @@ package utils;
 
 import rudp.RUDPSource;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.BufferedOutputStream;
+import java.io.*;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,11 +29,20 @@ public class FileProcessor {
      */
     private static final Utils utils = new Utils();
 
-    /** File output stream for writing the received file. */
+    /**
+     * File output stream for writing the received file.
+     */
     private FileOutputStream fos = null;
 
-    /** Buffered stream to improve file writing efficiency. */
+    /**
+     * Buffered stream to improve file writing efficiency.
+     */
     private BufferedOutputStream bos = null;
+
+    /**
+     * File input stream for reading the file to be sent.
+     */
+    private FileInputStream fis = null;
 
     /**
      * Constructs a FileProcessor, initializing logging to a file.
@@ -57,8 +62,14 @@ public class FileProcessor {
      * @return the File object if it exists and is readable, or {@code null}
      * if validation fails
      */
-    public static File getFile(String fileAbsolutePath) {
+    public File getFile(String fileAbsolutePath) {
         File file = new File(fileAbsolutePath);
+        try {
+            this.fis = new FileInputStream(file);
+        } catch (FileNotFoundException e) {
+            logger.log(Level.SEVERE, "File Not found: " + fileAbsolutePath);
+            throw new IllegalArgumentException("File provided is not accessible");
+        }
         if (!utils.validateFile(file)) {
             logger.log(Level.SEVERE,
                     "File does not exist or cannot be read, check the path or reading permissions");
@@ -89,20 +100,17 @@ public class FileProcessor {
      * @return a byte array containing up to {@code size} bytes of data,
      * or {@code null} if an I/O error occurs or end-of-file is reached
      */
-    public static byte[] getPayload(File file, long index, int size) {
-        try (FileInputStream fin = new FileInputStream(file)) {
+    public byte[] getPayload(File file,
+                             long index,
+                             int size) {
+        try {
             byte[] payload = new byte[size];
-            long skipBytes = size * index;
-            if (skipBytes != fin.skip(skipBytes)) {
-                logger.log(Level.SEVERE, "Could not skip to the desired bytes");
-                return null;
-            }
-            int sizeRead = fin.read(payload, 0, size);
+            int sizeRead = fis.read(payload, 0, size);
             if (sizeRead < 0) {
                 // End-of-file reached without reading data
                 return null;
             }
-            if (sizeRead != size) {
+            if (sizeRead < size) {
                 byte[] trimmed = new byte[sizeRead];
                 System.arraycopy(payload, 0, trimmed, 0, sizeRead);
                 return trimmed;
@@ -119,25 +127,29 @@ public class FileProcessor {
      * specified congestion window size, starting at the given packet index.
      * Each PacketInfo is initialized with its file-offset (start) and payload length.
      *
-     * @param window                the map to populate (key = sequence number)
-     * @param file                  the file to fragment into packets
-     * @param index                 the starting packet index (offset in packets)
-     * @param size                  the payload size per packet in bytes
-     * @param congestionWindowSize  the maximum number of outstanding packets
-     *                              to generate
-     * @param currentSequenceNumber the initial sequence number for packet keys
-     * @param receiverHost          the destination IP address
-     * @param receiverPort          the destination UDP port
+     * @param window               the map to populate (key = sequence number)
+     * @param file                 the file to fragment into packets
+     * @param index                the starting packet index (offset in packets)
+     * @param size                 the payload size per packet in bytes
+     * @param congestionWindowSize the maximum number of outstanding packets
+     *                             to generate
+     * @param receiverHost         the destination IP address
+     * @param receiverPort         the destination UDP port
+     * @return the total packets added.
      */
-    public void fillWindow(ConcurrentHashMap<Integer, PacketInfo> window,
-                           File file,
-                           long index,
-                           int size,
-                           int congestionWindowSize,
-                           int currentSequenceNumber,
-                           InetAddress receiverHost,
-                           int receiverPort) {
+    public int fillWindow(ConcurrentHashMap<Integer, PacketInfo> window,
+                          File file,
+                          long index,
+                          int size,
+                          int congestionWindowSize,
+                          InetAddress receiverHost,
+                          int receiverPort) {
+        int total = 0; // Total packets processed
         while (window.size() < congestionWindowSize) {
+            int currentSequenceNumber = (int) (index % (RUDPSource.maximumSequenceNumber + 1));
+            if (window.containsKey(currentSequenceNumber)) {
+                return total;
+            }
             byte[] payload = getPayload(file, index, size);
             DatagramPacket packet = PacketProcessor.buildDataPacket(
                     payload, currentSequenceNumber,
@@ -147,12 +159,14 @@ public class FileProcessor {
             info.length = (payload != null ? payload.length : 0);
             window.put(currentSequenceNumber, info);
             index++;
-            currentSequenceNumber = (currentSequenceNumber + 1) % (RUDPSource.maximumSequenceNumber + 1);
+            total++;
         }
+        return total;
     }
 
     /**
      * Initializes the output file for writing received chunks.
+     *
      * @param filename Full path to the output file to be created
      */
     public void startReconstruction(String filename) {
@@ -168,13 +182,13 @@ public class FileProcessor {
 
     /**
      * Writes a chunk of received payload to the file.
+     *
      * @param chunkData Payload data in order
      */
     public void writeChunk(byte[] chunkData) {
         try {
             if (bos != null) {
                 bos.write(chunkData);
-                bos.flush();
             }
         } catch (IOException e) {
             logger.log(Level.SEVERE, "Error writing chunk to file", e);
@@ -186,9 +200,18 @@ public class FileProcessor {
      */
     public void close() {
         try {
-            if (bos != null) bos.close();
-            if (fos != null) fos.close();
-            logger.info("[FILE SAVED] Output file closed.");
+            if (bos != null) {
+                bos.flush();
+                bos.close();
+            }
+            if (fos != null) {
+                fos.flush();
+                fos.close();
+                logger.info("[FILE SAVED] Output file closed.");
+            }
+            if (fis != null) {
+                fis.close();
+            }
         } catch (IOException e) {
             logger.log(Level.SEVERE, "Error closing file output stream", e);
         }
