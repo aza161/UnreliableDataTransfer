@@ -40,7 +40,7 @@ public class RUDPSource {
      * The maximum RTO after which the application will terminate if a re-transmission is needed.
      * in milliseconds
      */
-    public static final long maximumTimeOut = 60000;
+    public static final long maximumTimeOut = 6000;
 
     /**
      * A byte used to identify a data-containing packet.
@@ -131,6 +131,11 @@ public class RUDPSource {
     private AtomicLong prevTotalPacketsSent;
 
     /**
+     * Counter for AI.
+     */
+    private double accumilator = 0;
+
+    /**
      * The socket the application uses.
      */
     private DatagramSocket socket;
@@ -215,6 +220,12 @@ public class RUDPSource {
                       int receiverPort,
                       File file,
                       int port) {
+        try {
+            logger.addHandler(new FileHandler("RUDPSourceLogs.xml"));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
         if (!utils.validateFile(file)) {
             String errorMsg = "File provided cannot be read or is a directory: " + file.toString();
             RUDPSource.logger.log(Level.SEVERE, errorMsg);
@@ -235,18 +246,13 @@ public class RUDPSource {
             throw new IllegalArgumentException("Invalid port number: " + port);
         }
 
+        this.RTO = new AtomicLong(1000);
         congestionWindowSize = new AtomicInteger(64);
         slowStartThreshold = new AtomicInteger(windowSize);
 
         smoothedRTT = new AtomicLong(500);
         RTTVar = new AtomicLong(250);
         this.updateRTO();
-
-        try {
-            logger.addHandler(new FileHandler("RUDPSourceLogs.xml"));
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
 
         try {
             this.socket = new DatagramSocket(port);
@@ -307,21 +313,37 @@ public class RUDPSource {
             old.cancel(false);
         }
 
-        long delay = RTO.get(); // the current delay/RTO
+        long delay = RTO.get(); // the current delay RTO
+        logger.fine("[TIMER] schedule seq=" + sequenceNumber + " in " + delay + "ms");
 
         // The function to be executed when the timer timeouts
         ScheduledFuture<?> future = scheduler.schedule(() -> {
             // if still outstanding, retransmit
             PacketInfo pi = window.get(sequenceNumber);
             if (pi != null) {
+                logger.log(Level.WARNING, "[TIMEOUT] Packet seq=" + sequenceNumber + " timed out. Retransmitting.");
                 // exponential back-off global RTO
                 long nextRTO = Math.min(RTO.get() * 2, maximumTimeOut);
                 RTO.set(nextRTO);
                 pi.retransmitted++;
                 sendPacket(sequenceNumber);
-                pi.lastSentTime = Instant.now().toEpochMilli();
                 window.put(sequenceNumber, pi);
-                sequenceAckCount.put(sequenceNumber, new AtomicInteger(0));
+                //sequenceAckCount.put(sequenceNumber, new AtomicInteger(0));
+                logger.log(Level.INFO, "[DATA RE-TRANSMISSION]: " + pi.start + " | " + pi.length + " attempts=" + pi.retransmitted);
+                logger.log(Level.INFO, "[REXMIT] seq=" + sequenceNumber + " newRTO=" + RTO.get());
+
+                int currentCongestionWindowSize = this.congestionWindowSize.get();
+                this.slowStartThreshold.set(Math.max(1, currentCongestionWindowSize / 2)); // Set ssthresh to half of current cwnd
+                this.congestionWindowSize.set(1); // Set cwnd to 1
+                logger.info("[CC] after Timeout MD: cwnd=" + congestionWindowSize.get() + " ssthresh=" + slowStartThreshold.get());
+
+                // Reset prevTotalPacketsSent and accumulator upon timeout/decrease
+                this.prevTotalPacketsSent.set(this.totalPacketsSent.get());
+                this.accumilator = 0;
+                scheduleRetransmit(sequenceNumber);
+                logger.log(Level.INFO, "[CC] Timeout Reset prevSent to: " + this.totalPacketsSent.get());
+            } else {
+                logger.log(Level.FINE, "[TIMER] Timer for seq=" + sequenceNumber + " fired, but packet was already ACKed.");
             }
         }, delay, TimeUnit.MILLISECONDS);
         timers.put(sequenceNumber, future);
@@ -335,65 +357,89 @@ public class RUDPSource {
      * @param seqNum the sequence number of the packet that was ACKed.
      */
     public void onAck(int seqNum) {
+        logger.log(Level.FINE, "[onAck] Received ACK for seq=" + seqNum);
         // This function still has no way to deal with duplicate ACKs
         int totalACKs = sequenceAckCount.computeIfAbsent(seqNum, k -> new AtomicInteger(0)).incrementAndGet();
 
+        logger.log(Level.FINE, "[onAck] seq=" + seqNum + " totalACKs=" + totalACKs);
 
         if (totalACKs == 1) {
             // increment the total packets sent
             this.totalPacketsSent.incrementAndGet();
+            logger.log(Level.FINE, "[onAck] Incremented totalPacketsSent to: " + totalPacketsSent.get());
+        } else {
+            logger.log(Level.FINE, "[onAck] Not incrementing totalPacketsSent for seq=" + seqNum + " (totalACKs > 1)");
         }
         // 1) cancel that packet’s timer
         ScheduledFuture<?> task = this.timers.remove(seqNum);
 
         if (task != null) {
-            task.cancel(false);
+            task.cancel(true);
+            logger.log(Level.FINE, "[onAck] Cancelled timer for seq=" + seqNum);
+        } else {
+            logger.log(Level.FINE, "[onAck] No timer found for seq=" + seqNum + " (already cancelled or never set?)");
         }
 
-        PacketInfo pi = this.window.get(seqNum);
+        PacketInfo pi = this.window.remove(seqNum);
 
         // 2) RTT update (Karn’s rule: only if attempts == 1, i.e. retransmitted == 0)
-        if (pi != null && pi.retransmitted == 0) {
-            long sampleRTT = Instant.now().toEpochMilli() - pi.lastSentTime;
-            double sigma = computeSigma(sampleRTT);
-            this.updateSmoothedRTT(sampleRTT);
-            this.updateRTTVar(sigma);
-            this.updateRTO();
+        if (pi != null) {
+            logger.log(Level.INFO, "[DATA ACKED]: " + pi.start + " | " + pi.length + " retransmitted=" + pi.retransmitted);
+            if (pi.retransmitted == 0) {
+                long sampleRTT = Instant.now().toEpochMilli() - pi.lastSentTime;
+                double sigma = computeSigma(sampleRTT);
+                this.updateSmoothedRTT(sampleRTT);
+                this.updateRTTVar(sigma);
+                this.updateRTO();
+                logger.log(Level.FINE, "[onAck] RTT updated. sampleRTT=" + sampleRTT + " smoothedRTT=" + smoothedRTT.get() + " RTTVar=" + RTTVar.get() + " RTO=" + RTO.get());
+            } else {
+                logger.log(Level.FINE, "[onAck] RTT not updated for retransmitted packet seq=" + seqNum);
+            }
+        } else {
+            logger.log(Level.FINE, "[onAck] PacketInfo not found for seq=" + seqNum + " in window (already ACKed?)");
         }
 
-        // remove the packet from the window.
-        this.window.remove(seqNum);
 
         // If the packet timed-out we do multiplicative decrease
         // We also duplicate the RTO
-        if ((pi != null && pi.retransmitted != 0) || totalACKs > 3) {
-            int currentCongestionWindowSize = this.congestionWindowSize.get();
-            // set ssthreshold to cwnd_size
-            this.slowStartThreshold.set(currentCongestionWindowSize);
-            // multiply the cwnd_size by 0.5
-            this.congestionWindowSize.set(currentCongestionWindowSize / 2);
-
-            if (totalACKs > 3) {
-                long nextRTO = Math.min(RTO.get() * 2, maximumTimeOut);
-                RTO.set(nextRTO);
-            }
+        if (pi != null && pi.retransmitted != 0) {
+            logger.log(Level.INFO, "[CC] Received ACK for retransmitted packet seq=" + seqNum + ". Decrease already handled by timeout.");
         }
 
-        // if the total packets sent are less than ssthreshold we increment the cwnd_size.
-        if (this.totalPacketsSent.get() < this.slowStartThreshold.get()) {
+
+        // Check if in Slow Start phase (cwnd < ssthresh)
+        if (this.congestionWindowSize.get() < this.slowStartThreshold.get()) {
             this.congestionWindowSize.incrementAndGet();
+            this.accumilator = 0;
+            this.prevTotalPacketsSent.set(0);
+            logger.log(Level.FINE, "[CC] In Slow Start. cwnd incremented to " + congestionWindowSize.get());
         }
 
         // else we start doing additive increase
         else {
-            long totalPacksSentAfterLastCwndUpdate = this.totalPacketsSent.get() - this.prevTotalPacketsSent.get();
+            if (this.prevTotalPacketsSent.get() == 0) {
+                this.prevTotalPacketsSent.set(this.totalPacketsSent.get());
+                logger.log(Level.INFO, "[CC] Transitioned to Congestion Avoidance. Setting prevTotalPacketsSent to " + prevTotalPacketsSent.get());
+                this.accumilator = 0; // Reset accumulator on transition
+            }
+            accumilator += (1.0 / this.congestionWindowSize.get());
+            logger.log(Level.FINE, "[CC] In Congestion Avoidance. Accumulator is now: " + accumilator);
 
             // the total packets sent are the size of congestion window
-            if (totalPacksSentAfterLastCwndUpdate == congestionWindowSize.get()) {
+            if (accumilator >= 1.0) {
                 this.congestionWindowSize.incrementAndGet();
                 this.prevTotalPacketsSent.set(this.totalPacketsSent.get());
+                accumilator = 0;
+                logger.log(Level.INFO, "[CC] Additive Increase: cwnd incremented to " + congestionWindowSize.get() + ". prevTotalPacketsSent set to " + prevTotalPacketsSent.get());
+            } else {
+                logger.log(Level.FINE, "[CC] In Congestion Avoidance, waiting for more ACKs for AI increment.");
             }
         }
+
+        logger.log(Level.INFO, String.format("[CC] RTT=%d  RTO=%d  cwnd=%d  sent=%d  prevSent=%d ssthresh=%d accum=%.2f",
+                smoothedRTT.get(), RTO.get(), congestionWindowSize.get(),
+                totalPacketsSent.get(), prevTotalPacketsSent.get(), this.slowStartThreshold.get(), accumilator));
+
     }
 
     /**
@@ -474,19 +520,21 @@ public class RUDPSource {
         int payloadLength = RUDPSource.MSS - RUDPSource.HEADER_SIZE;
 
         // Fill the current cwnd with packets.
-        fp.fillWindow(rudpSource.window, file, 0, payloadLength, rudpSource.congestionWindowSize.get(), destHost, destPort);
-        rudpSource.index = rudpSource.window.size();
+        logger.log(Level.FINE, "[SEND-LOOP] Initial window fill. cwnd=" + rudpSource.congestionWindowSize.get());
+        rudpSource.index += fp.fillWindow(rudpSource.window, file, 0, payloadLength, rudpSource.congestionWindowSize.get(), destHost, destPort);
+        logger.log(Level.FINE, "[SEND-LOOP] Initial window filled. window size=" + rudpSource.window.size() + " index=" + rudpSource.index);
 
         Thread sendingThread = new Thread(() -> {
             int currentSequenceNumber = 0;
 
             // Total packets in a file.
             long totalPackets = FileProcessor.getNumberOfPackets(file);
-
+            logger.log(Level.INFO, "[SEND-LOOP] Starting sending thread. Total packets to send: " + totalPackets);
             // repeat until all packets are sent.
             while (rudpSource.totalPacketsSent.get() < totalPackets) {
                 // check if the cwnd is empty and refill it.
-                if (rudpSource.window.size() < rudpSource.congestionWindowSize.get()) {
+                if (rudpSource.window.size() < rudpSource.congestionWindowSize.get() && rudpSource.index < totalPackets) {
+                    logger.log(Level.FINE, "[SEND-LOOP] window=" + rudpSource.window.size() + " cwnd=" + rudpSource.congestionWindowSize.get());
                     rudpSource.index += fp.fillWindow(rudpSource.window, file, rudpSource.index, payloadLength, rudpSource.congestionWindowSize.get(), destHost, destPort);
                     continue;
                 }
@@ -499,12 +547,11 @@ public class RUDPSource {
                 }
 
                 rudpSource.sendPacket(currentSequenceNumber);
-                // set the time of sending the packet to the current time
-                rudpSource.window.get(currentSequenceNumber).lastSentTime = Instant.now().toEpochMilli();
                 rudpSource.scheduleRetransmit(currentSequenceNumber);
                 // if the max sequence number is reached we wrap around.
                 currentSequenceNumber = (currentSequenceNumber + 1) % (maximumSequenceNumber + 1);
             }
+            logger.log(Level.INFO, "Exited Sending Loop!");
         });
 
         Thread listeningThread = new Thread(() -> {
@@ -513,11 +560,23 @@ public class RUDPSource {
                 DatagramPacket packet = rudpSource.receive();
                 long now = Instant.now().toEpochMilli();
                 if (packet == null) {
-                    continue;
+                    // Socket might be closed or an error occurred
+                    if (rudpSource.socket.isClosed()) {
+                        logger.info("[RECEIVE-LOOP] Socket is closed, exiting loop.");
+                        break;
+                    }
+                    try {
+                        Thread.sleep(10); // Prevent busy waiting if receive returns null for other reasons
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    break;
                 }
                 int seqNum = PacketProcessor.getSequenceNumber(packet);
                 rudpSource.onAck(seqNum);
             }
+            logger.log(Level.INFO, "Exited Receiving Loop!");
         });
 
         listeningThread.start();
@@ -539,6 +598,7 @@ public class RUDPSource {
             // I'm too lazy to implement ACKs for END Signal.
             while (i-- > 0) {
                 rudpSource.socket.send(PacketProcessor.buildEndPacket(destHost, destPort));
+                Thread.sleep(500);
             }
         } catch (InterruptedException e) {
             logger.log(Level.SEVERE, "Failed to wait before sending END signal", e);
